@@ -11,8 +11,31 @@ This project provides a solution for importing data from Alibaba Cloud Lindorm t
 
 ## Solution Architecture
 
-```
-Alibaba Cloud Lindorm → Amazon EMR (Flink) → AWS DynamoDB
+```mermaid
+graph LR
+    subgraph "Alibaba Cloud"
+        A[Lindorm Database] --> |Timestamp<br>Filtered Data| B[Lindorm Connector]
+    end
+    
+    subgraph "Amazon EMR Cluster"
+        B --> C[Flink Job Manager]
+        C --> D[Flink Task Manager]
+        D --> |Checkpoint State| E[(Amazon S3)]
+        E --> D
+    end
+    
+    subgraph "AWS"
+        D --> |Batch Writes| F[DynamoDB]
+        G[CloudWatch] --> |Metrics| C
+        G --> |Metrics| F
+    end
+    
+    style A fill:#FF9900,stroke:#FF6600,stroke-width:2px
+    style F fill:#3F8624,stroke:#2F6213,stroke-width:2px
+    style C fill:#FF6C37,stroke:#FF4105,stroke-width:2px
+    style D fill:#FF6C37,stroke:#FF4105,stroke-width:2px
+    style E fill:#3B48CC,stroke:#152AA6,stroke-width:2px
+    style G fill:#BC6DAC,stroke:#9B479F,stroke-width:2px
 ```
 
 ### Key Components
@@ -21,6 +44,7 @@ Alibaba Cloud Lindorm → Amazon EMR (Flink) → AWS DynamoDB
 - **Processing**: Amazon EMR cluster running Apache Flink
 - **Destination**: AWS DynamoDB
 - **Storage**: Amazon S3 for checkpoints and state management
+- **Monitoring**: CloudWatch for metrics and alerts
 
 ## Quick Start
 
@@ -74,6 +98,160 @@ This approach provides:
 - Reduced data transfer
 - Lower memory usage
 - Reduced serialization/deserialization overhead
+
+### Flink Java Code Explanation
+
+The main implementation is in `LindormToDynamoDBImport.java`, which orchestrates the data transfer process. Here's a detailed explanation of the key components:
+
+#### 1. Command Line Arguments
+
+```java
+// Parse command line arguments
+final String lindormUrl = args[0];
+final String lindormTable = args[1];
+final String lindormUsername = args[2];
+final String lindormPassword = args[3];
+final String startTimestamp = args[4];
+final String endTimestamp = args[5];
+final String dynamodbRegion = args[6];
+final String dynamodbTable = args[7];
+final String dynamodbEndpoint = args.length > 8 ? args[8] : null;
+```
+
+The application accepts parameters for both source and target configurations, including timestamp range for filtering.
+
+#### 2. Flink Environment Setup
+
+```java
+// Set up the streaming execution environment
+final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+// Configure checkpointing for exactly-once processing
+env.enableCheckpointing(60000); // Checkpoint every minute
+env.getCheckpointConfig().setMinPauseBetweenCheckpoints(30000); // 30 seconds
+env.getCheckpointConfig().setCheckpointTimeout(600000); // 10 minutes
+
+// Create the table environment
+final StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+```
+
+This configures the Flink execution environment with checkpointing for fault tolerance and exactly-once processing guarantees.
+
+#### 3. Lindorm Source Configuration
+
+```java
+// Apply timestamp range filter in the query
+String query = String.format(
+    "SELECT * FROM %s WHERE timestamp_column >= '%s' AND timestamp_column < '%s'",
+    lindormTable, startTimestamp, endTimestamp
+);
+
+// Register Lindorm table
+tableEnv.executeSql(String.format(
+    "CREATE TABLE lindorm_source (" +
+    "   id STRING, " +
+    "   timestamp_column TIMESTAMP(3), " +
+    "   data STRING, " +
+    "   PRIMARY KEY (id) NOT ENFORCED" +
+    ") WITH (" +
+    "   'connector' = 'lindorm', " +
+    "   'url' = '%s', " +
+    "   'table-name' = '%s', " +
+    "   'username' = '%s', " +
+    "   'password' = '%s', " +
+    "   'scan.query' = '%s', " +
+    "   'scan.fetch-size' = '1000'" +
+    ")",
+    lindormUrl, lindormTable, lindormUsername, lindormPassword, query
+));
+```
+
+This section configures the Lindorm source connector with timestamp-based filtering and registers it as a table in Flink's Table API.
+
+#### 4. DynamoDB Sink Configuration
+
+```java
+// Register DynamoDB table
+String dynamodbConnectorConfig = String.format(
+    "CREATE TABLE dynamodb_sink (" +
+    "   id STRING, " +
+    "   timestamp_column TIMESTAMP(3), " +
+    "   data STRING, " +
+    "   PRIMARY KEY (id) NOT ENFORCED" +
+    ") WITH (" +
+    "   'connector' = 'dynamodb', " +
+    "   'table-name' = '%s', " +
+    "   'aws.region' = '%s', " +
+    "   'aws.batch-size' = '25'",
+    dynamodbTable, dynamodbRegion
+);
+
+// Add endpoint if provided (useful for testing with DynamoDB Local)
+if (dynamodbEndpoint != null && !dynamodbEndpoint.isEmpty()) {
+    dynamodbConnectorConfig += String.format(", 'aws.endpoint' = '%s'", dynamodbEndpoint);
+}
+
+dynamodbConnectorConfig += ")";
+tableEnv.executeSql(dynamodbConnectorConfig);
+```
+
+This configures the DynamoDB sink connector with batch writing enabled for optimal performance.
+
+#### 5. Data Transfer Execution
+
+```java
+// Execute the import using SQL
+tableEnv.executeSql("INSERT INTO dynamodb_sink SELECT * FROM lindorm_source");
+```
+
+This simple SQL statement performs the actual data transfer, leveraging Flink's SQL capabilities.
+
+#### 6. Alternative DataStream API Approach
+
+The code also includes a commented-out alternative implementation using the DataStream API:
+
+```java
+// Convert table to stream
+Table sourceTable = tableEnv.sqlQuery("SELECT * FROM lindorm_source");
+DataStream<Row> dataStream = tableEnv.toDataStream(sourceTable);
+
+// Apply additional transformations if needed
+dataStream = dataStream
+    .rebalance()  // Evenly distribute records across tasks
+    .map(new EnrichmentFunction());  // Apply any transformations
+
+// Convert back to table and write to DynamoDB
+Table resultTable = tableEnv.fromDataStream(dataStream);
+tableEnv.createTemporaryView("processed_data", resultTable);
+tableEnv.executeSql("INSERT INTO dynamodb_sink SELECT * FROM processed_data");
+```
+
+This approach provides more flexibility for complex transformations, such as adding a random suffix to IDs to avoid hot partitions:
+
+```java
+public static class EnrichmentFunction implements MapFunction<Row, Row> {
+    @Override
+    public Row map(Row value) throws Exception {
+        // Apply transformations if needed
+        // For example, add a random suffix to the ID to avoid hot partitions
+        // String id = value.getFieldAs("id") + "-" + (int)(Math.random() * 100);
+        // value.setField("id", id);
+        return value;
+    }
+}
+```
+
+#### 7. Error Handling and Fault Tolerance
+
+The application uses Flink's checkpointing mechanism to ensure fault tolerance:
+
+```java
+env.enableCheckpointing(60000); // Checkpoint every minute
+env.getCheckpointConfig().setMinPauseBetweenCheckpoints(30000); // 30 seconds
+env.getCheckpointConfig().setCheckpointTimeout(600000); // 10 minutes
+```
+
+This ensures that in case of failures, the job can recover from the last successful checkpoint without data loss or duplication.
 
 ### Project Structure
 
