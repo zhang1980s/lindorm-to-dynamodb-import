@@ -1,0 +1,197 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for Lindorm to DynamoDB import solution'
+
+Parameters:
+  DynamoDBTableName:
+    Type: String
+    Description: Name of the DynamoDB table to create
+    Default: lindorm-import-target
+  
+  S3BucketName:
+    Type: String
+    Description: Name of the S3 bucket to create for storing logs and JAR files
+    Default: lindorm-import-bucket
+  
+  DynamoDBReadCapacity:
+    Type: Number
+    Description: Read capacity units for the DynamoDB table
+    Default: 5
+    MinValue: 5
+  
+  DynamoDBWriteCapacity:
+    Type: Number
+    Description: Write capacity units for the DynamoDB table
+    Default: 5000
+    MinValue: 5
+
+Resources:
+  # S3 bucket for storing logs and JAR files
+  ImportBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Project
+          Value: LindormToDynamoDBImport
+
+  # DynamoDB table for import target
+  ImportTargetTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref DynamoDBTableName
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: !Ref DynamoDBReadCapacity
+        WriteCapacityUnits: !Ref DynamoDBWriteCapacity
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: LindormToDynamoDBImport
+
+  # IAM role for EMR service
+  EMRServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: elasticmapreduce.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceRole
+      Tags:
+        - Key: Project
+          Value: LindormToDynamoDBImport
+
+  # IAM role for EC2 instances in EMR cluster
+  EMRInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EMRInstanceRole
+
+  EMRInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceforEC2Role
+      Tags:
+        - Key: Project
+          Value: LindormToDynamoDBImport
+
+  # Custom policy for DynamoDB access
+  DynamoDBAccessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: DynamoDBAccessPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:BatchWriteItem
+              - dynamodb:PutItem
+              - dynamodb:DescribeTable
+              - dynamodb:ListTables
+            Resource: !GetAtt ImportTargetTable.Arn
+      Roles:
+        - !Ref EMRInstanceRole
+
+  # Custom policy for S3 access
+  S3AccessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: S3AccessPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+            Resource:
+              - !Sub arn:aws:s3:::${S3BucketName}
+              - !Sub arn:aws:s3:::${S3BucketName}/*
+      Roles:
+        - !Ref EMRInstanceRole
+
+  # CloudWatch Dashboard for monitoring
+  ImportMonitoringDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ${DynamoDBTableName}-import-dashboard
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", "${DynamoDBTableName}", { "stat": "Sum", "period": 60 } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "DynamoDB Write Capacity Consumption"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/DynamoDB", "ThrottledRequests", "TableName", "${DynamoDBTableName}", "Operation", "PutItem", { "stat": "Sum", "period": 60 } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "DynamoDB Throttled Requests"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  DynamoDBTableName:
+    Description: Name of the created DynamoDB table
+    Value: !Ref ImportTargetTable
+  
+  S3BucketName:
+    Description: Name of the created S3 bucket
+    Value: !Ref ImportBucket
+  
+  EMRServiceRoleARN:
+    Description: ARN of the EMR service role
+    Value: !GetAtt EMRServiceRole.Arn
+  
+  EMRInstanceProfileARN:
+    Description: ARN of the EMR instance profile
+    Value: !GetAtt EMRInstanceProfile.Arn
+  
+  DashboardURL:
+    Description: URL to the CloudWatch dashboard for monitoring the import
+    Value: !Sub https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${DynamoDBTableName}-import-dashboard

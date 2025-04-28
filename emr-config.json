@@ -1,0 +1,63 @@
+{
+  "Name": "Lindorm to DynamoDB Import Cluster",
+  "LogUri": "s3://your-bucket/logs/",
+  "ReleaseLabel": "emr-6.9.0",
+  "Applications": [
+    {
+      "Name": "Flink"
+    }
+  ],
+  "Instances": {
+    "InstanceGroups": [
+      {
+        "Name": "Primary node",
+        "Market": "ON_DEMAND",
+        "InstanceRole": "MASTER",
+        "InstanceType": "m5.2xlarge",
+        "InstanceCount": 1
+      },
+      {
+        "Name": "Core nodes",
+        "Market": "ON_DEMAND",
+        "InstanceRole": "CORE",
+        "InstanceType": "r5.2xlarge",
+        "InstanceCount": 12
+      }
+    ],
+    "Ec2KeyName": "your-key-pair",
+    "KeepJobFlowAliveWhenNoSteps": true,
+    "TerminationProtected": false
+  },
+  "JobFlowRole": "EMR_EC2_DefaultRole",
+  "ServiceRole": "EMR_DefaultRole",
+  "Configurations": [
+    {
+      "Classification": "flink-conf",
+      "Properties": {
+        "taskmanager.numberOfTaskSlots": "4",
+        "parallelism.default": "48",
+        "taskmanager.memory.process.size": "52428mb",
+        "taskmanager.memory.managed.size": "32768mb",
+        "execution.checkpointing.interval": "60000",
+        "execution.checkpointing.min-pause-between-checkpoints": "30000",
+        "execution.checkpointing.timeout": "600000"
+      }
+    },
+    {
+      "Classification": "flink-log4j",
+      "Properties": {
+        "log4j.rootLogger": "INFO, console"
+      }
+    }
+  ],
+  "Tags": [
+    {
+      "Key": "Project",
+      "Value": "LindormToDynamoDBImport"
+    },
+    {
+      "Key": "Environment",
+      "Value": "Production"
+    }
+  ]
+}

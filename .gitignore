@@ -1,0 +1,30 @@
+# Maven build artifacts
+target/
+*.jar
+*.war
+*.ear
+*.class
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Credentials
+*.pem
+*.key
+*.crt
+
+# Build files
+dependency-reduced-pom.xml
